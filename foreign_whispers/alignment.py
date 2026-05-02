@@ -10,13 +10,25 @@ The module provides:
 - ``decide_action`` — per-segment policy that chooses accept / stretch / shift / retry / fail.
 - ``global_align`` — greedy left-to-right pass that schedules all segments
   on a shared timeline, tracking cumulative drift from gap shifts.
+- ``global_align_dp`` — LP-based global optimizer that allocates silence
+  budgets to the segments that need them most before scheduling.
 
-No external dependencies — stdlib only.
+No external dependencies beyond numpy and scipy.
 """
 import dataclasses
 import re
 import unicodedata
 from enum import Enum
+from pathlib import Path
+import joblib
+
+try:
+    MODEL_PATH = Path("/home/faiz/courses/foreign-whispers/pipeline_data/duration_model.pkl")
+    DURATION_MODEL = joblib.load(MODEL_PATH)
+except FileNotFoundError:
+    DURATION_MODEL = None
+    print("Warning: duration_model.pkl not found. Falling back to heuristic.")
+
 
 
 def _count_syllables(text: str) -> int:
@@ -73,8 +85,26 @@ class SegmentMetrics:
     overflow_s:        float = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
-        syllables = _count_syllables(self.translated_text)
-        self.predicted_tts_s = syllables / 4.5
+        if DURATION_MODEL:
+            # ML INFERENCE PATH
+            chars = len(self.translated_text)
+            words = len(self.translated_text.split())
+            syllables = _count_syllables(self.translated_text)
+            punctuation = len(re.findall(r"[,.;:!?]", self.translated_text))
+            
+            features = [[chars, words, syllables, punctuation]]
+            # Predict returns an array, grab the first element
+            self.predicted_tts_s = float(DURATION_MODEL.predict(features)[0])
+            
+            # Prevent negative duration predictions from the linear model
+            self.predicted_tts_s = max(0.5, self.predicted_tts_s) 
+            
+        else:
+            # FALLBACK HEURISTIC PATH (If model fails to load)
+            syllables = _count_syllables(self.translated_text)
+            self.predicted_tts_s = syllables / 4.5
+
+        # The rest remains the same
         self.predicted_stretch = (
             self.predicted_tts_s / self.source_duration_s
             if self.source_duration_s > 0 else 1.0
@@ -272,6 +302,191 @@ def global_align(
         elif action == AlignAction.MILD_STRETCH:
             stretch = min(m.predicted_stretch, max_stretch)
         # ACCEPT, REQUEST_SHORTER, FAIL → stretch stays at 1.0
+
+        sched_start = m.source_start + cumulative_drift
+        sched_end   = sched_start + m.source_duration_s + gap_shift
+
+        aligned.append(AlignedSegment(
+            index           = m.index,
+            original_start  = m.source_start,
+            original_end    = m.source_end,
+            scheduled_start = sched_start,
+            scheduled_end   = sched_end,
+            text            = m.translated_text,
+            action          = action,
+            gap_shift_s     = gap_shift,
+            stretch_factor  = stretch,
+        ))
+
+        cumulative_drift += gap_shift
+
+    return aligned
+
+
+def _estimate_duration(metrics: list[SegmentMetrics]) -> float:
+    """Compute total duration based on the new ML/Syllable predicted TTS durations.
+
+    This provides a target duration independent of VAD-based alignment, useful
+    as a fallback or reference.
+
+    Args:
+        metrics: Per-segment timing metrics.
+
+    Returns:
+        Total duration in seconds: sum over segments of predicted_tts_s.
+    """
+    return sum(m.predicted_tts_s for m in metrics)
+
+
+import numpy as np
+from scipy.optimize import linprog
+
+
+def global_align_dp(
+    metrics: list[SegmentMetrics],
+    silence_regions: list[dict],
+    max_stretch: float = 1.4,
+) -> list[AlignedSegment]:
+    """Global alignment via linear programming over silence-gap allocations.
+
+    Unlike the greedy pass, which awards silence to the first segment that
+    needs it, this optimizer treats gap allocation as a global resource
+    problem: it finds the assignment of silence budgets to segments that
+    minimises *total* overflow across the whole clip.
+
+    Formulation
+    -----------
+    Decision variables (one per segment)::
+
+        g_i  ∈ [0, gap_capacity_i]   — seconds of silence allocated to segment i
+
+    Objective — minimise total weighted overflow after allocation::
+
+        minimise  Σ_i  w_i * max(0, overflow_i - g_i)
+
+    Because ``linprog`` requires a linear objective, we introduce slack
+    variables ``s_i ≥ 0`` and rewrite::
+
+        minimise  Σ_i  w_i * s_i
+        subject to:
+            s_i  ≥  overflow_i - g_i        (slack absorbs remaining overflow)
+            s_i  ≥  0
+            0  ≤  g_i  ≤  gap_capacity_i    (can't borrow more than available)
+            Σ_i  g_i  ≤  total_silence      (global silence budget)
+
+    Weights ``w_i`` are set to ``predicted_stretch_i`` so that segments
+    already far over budget are prioritised over mildly overflowing ones.
+
+    After solving, each segment is scheduled greedily left-to-right with its
+    allocated gap, producing a non-overlapping timeline.  The ``AlignAction``
+    is derived from the *post-allocation* stretch factor, which is the key
+    improvement over the greedy baseline: segments that received gap budget
+    may now fall into ``MILD_STRETCH`` or ``ACCEPT`` instead of
+    ``REQUEST_SHORTER``.
+
+    Args:
+        metrics: Per-segment timing metrics from ``compute_segment_metrics``.
+        silence_regions: VAD output — list of ``{"start_s", "end_s", "label"}``
+            dicts.  Pass ``[]`` if VAD is unavailable.
+        max_stretch: Upper bound for ``MILD_STRETCH`` speed factor.
+
+    Returns:
+        One ``AlignedSegment`` per input metric, in order.
+    """
+    n = len(metrics)
+    if n == 0:
+        return []
+
+    # ------------------------------------------------------------------
+    # 1. Build per-segment gap capacities from VAD silence regions.
+    #    A silence region is eligible for segment i if it starts within
+    #    0.1 s of that segment's end (matching the greedy heuristic).
+    # ------------------------------------------------------------------
+    def _gap_capacity(end_s: float) -> float:
+        for r in silence_regions:
+            if r.get("label") == "silence" and r["start_s"] >= end_s - 0.1:
+                return r["end_s"] - r["start_s"]
+        return 0.0
+
+    gap_caps      = np.array([_gap_capacity(m.source_end) for m in metrics])
+    overflows     = np.array([m.overflow_s                for m in metrics])
+    weights       = np.array([m.predicted_stretch          for m in metrics])
+    total_silence = gap_caps.sum()
+
+    # ------------------------------------------------------------------
+    # 2. Formulate the LP.
+    #
+    #    Variable layout:  x = [g_0 … g_{n-1}, s_0 … s_{n-1}]
+    #                           (gap allocs)    (slack / residual overflow)
+    #
+    #    Objective:  minimise  0·g  +  w·s
+    # ------------------------------------------------------------------
+    c = np.concatenate([np.zeros(n), weights])
+
+    # Inequality constraints  A_ub @ x <= b_ub
+    # (a)  s_i >= overflow_i - g_i   →   -g_i - s_i <= -overflow_i
+    A_slack = np.zeros((n, 2 * n))
+    for i in range(n):
+        A_slack[i, i]     = -1.0   # -g_i
+        A_slack[i, n + i] = -1.0   # -s_i
+    b_slack = -overflows
+
+    # (b)  Σ g_i <= total_silence
+    A_budget = np.zeros((1, 2 * n))
+    A_budget[0, :n] = 1.0
+    b_budget = np.array([total_silence])
+
+    A_ub = np.vstack([A_slack, A_budget])
+    b_ub = np.concatenate([b_slack, b_budget])
+
+    # Bounds:  g_i ∈ [0, gap_caps_i],  s_i ∈ [0, ∞)
+    bounds = (
+        [(0.0, float(cap)) for cap in gap_caps]
+        + [(0.0, None)      for _   in range(n)]
+    )
+
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+
+    if not res.success:
+        # Solver failed — fall back to the greedy result rather than crashing.
+        print(f"⚠️  global_align_dp solver warning: {res.message}. "
+              "Falling back to greedy.")
+        return global_align(metrics, silence_regions, max_stretch)
+
+    allocated_gaps = res.x[:n]   # g_i values from the LP solution
+
+    # ------------------------------------------------------------------
+    # 3. Schedule segments left-to-right using the LP-allocated gaps.
+    #    Cumulative drift accumulates just as in global_align.
+    # ------------------------------------------------------------------
+    aligned: list[AlignedSegment] = []
+    cumulative_drift = 0.0
+
+    for i, m in enumerate(metrics):
+        gap_shift = float(allocated_gaps[i])
+
+        # Post-allocation stretch: how much does the window need to cover?
+        available_s  = m.source_duration_s + gap_shift
+        post_stretch = m.predicted_tts_s / available_s if available_s > 0 else 1.0
+
+        # Derive action from post-allocation stretch — key difference from greedy,
+        # which derives action before any gap is assigned.
+        if post_stretch <= 1.1:
+            action  = AlignAction.ACCEPT
+            stretch = 1.0
+        elif post_stretch <= 1.4:
+            action  = AlignAction.MILD_STRETCH
+            stretch = min(post_stretch, max_stretch)
+        elif post_stretch <= 1.8 and gap_shift > 0:
+            # Gap was partially allocated but didn't fully cover overflow.
+            action  = AlignAction.GAP_SHIFT
+            stretch = 1.0
+        elif post_stretch <= 2.5:
+            action  = AlignAction.REQUEST_SHORTER
+            stretch = 1.0
+        else:
+            action  = AlignAction.FAIL
+            stretch = 1.0
 
         sched_start = m.source_start + cumulative_drift
         sched_end   = sched_start + m.source_duration_s + gap_shift

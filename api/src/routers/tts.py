@@ -27,6 +27,7 @@ async def tts_endpoint(
     request: Request,
     config: str = Query(..., pattern=r"^c-[0-9a-f]{7}$"),
     alignment: bool = Query(False),
+    speaker_wav: str = Query(None, description="Reference voice WAV path (e.g. 'es/default.wav')"),
 ):
     """Generate TTS audio for a translated transcript.
 
@@ -42,31 +43,37 @@ async def tts_endpoint(
         tts_engine=None,
     )
 
+    if speaker_wav is None:
+        speaker_wav = resolve_speaker_wav(settings.speakers_dir, "es")
+
     title = resolve_title(video_id)
     if title is None:
         raise HTTPException(status_code=404, detail=f"Video {video_id} not found in index")
 
     wav_path = audio_dir / f"{title}.wav"
 
+    # --- MODIFIED: Added skipped flag for caching criteria ---
     if wav_path.exists():
         return {
             "video_id": video_id,
             "audio_path": str(wav_path),
             "config": config,
+            "skipped": True  
         }
 
     source_path = str(trans_dir / f"{title}.json")
 
     await _run_in_threadpool(
-        None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment
+        None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment, speaker_wav=speaker_wav
     )
 
+    # --- MODIFIED: Added skipped flag for initial run ---
     return {
         "video_id": video_id,
         "audio_path": str(wav_path),
         "config": config,
+        "skipped": False
     }
-
 
 @router.get("/audio/{video_id}")
 async def get_audio(
@@ -83,3 +90,5 @@ async def get_audio(
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     return FileResponse(str(audio_path), media_type="audio/wav")
+
+from foreign_whispers.voice_resolution import resolve_speaker_wav

@@ -33,7 +33,7 @@ def diarize_audio(audio_path: str, hf_token: str | None = None) -> list[dict]:
     try:
         pipeline    = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token,
+            token=hf_token,
         )
         diarization = pipeline(audio_path)
         return [

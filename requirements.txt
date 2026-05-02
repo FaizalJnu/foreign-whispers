@@ -15,3 +15,4 @@ requests
 setuptools<81
 numpy<2
 transformers<4.46
+sentence-transformers>=3.0.0

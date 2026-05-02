@@ -1,170 +1,3 @@
-# """Deterministic failure analysis and translation re-ranking stubs.
-
-# The failure analysis function uses simple threshold rules derived from
-# SegmentMetrics.  The translation re-ranking function is a **student assignment**
-# — see the docstring for inputs, outputs, and implementation guidance.
-# """
-
-# import dataclasses
-# import logging
-
-# logger = logging.getLogger(__name__)
-
-
-# @dataclasses.dataclass
-# class TranslationCandidate:
-#     """A candidate translation that fits a duration budget.
-
-#     Attributes:
-#         text: The translated text.
-#         char_count: Number of characters in *text*.
-#         brevity_rationale: Short explanation of what was shortened.
-#     """
-#     text: str
-#     char_count: int
-#     brevity_rationale: str = ""
-
-
-# @dataclasses.dataclass
-# class FailureAnalysis:
-#     """Diagnostic summary of the dominant failure mode in a clip.
-
-#     Attributes:
-#         failure_category: One of "duration_overflow", "cumulative_drift",
-#             "stretch_quality", or "ok".
-#         likely_root_cause: One-sentence description.
-#         suggested_change: Most impactful next action.
-#     """
-#     failure_category: str
-#     likely_root_cause: str
-#     suggested_change: str
-
-
-# def analyze_failures(report: dict) -> FailureAnalysis:
-#     """Classify the dominant failure mode from a clip evaluation report.
-
-#     Pure heuristic — no LLM needed.  The thresholds below match the policy
-#     bands defined in ``alignment.decide_action``.
-
-#     Args:
-#         report: Dict returned by ``clip_evaluation_report()``.  Expected keys:
-#             ``mean_abs_duration_error_s``, ``pct_severe_stretch``,
-#             ``total_cumulative_drift_s``, ``n_translation_retries``.
-
-#     Returns:
-#         A ``FailureAnalysis`` dataclass.
-#     """
-#     mean_err = report.get("mean_abs_duration_error_s", 0.0)
-#     pct_severe = report.get("pct_severe_stretch", 0.0)
-#     drift = abs(report.get("total_cumulative_drift_s", 0.0))
-#     retries = report.get("n_translation_retries", 0)
-
-#     if pct_severe > 20:
-#         return FailureAnalysis(
-#             failure_category="duration_overflow",
-#             likely_root_cause=(
-#                 f"{pct_severe:.0f}% of segments exceed the 1.4x stretch threshold — "
-#                 "translated text is consistently too long for the available time window."
-#             ),
-#             suggested_change="Implement duration-aware translation re-ranking (P8).",
-#         )
-
-#     if drift > 3.0:
-#         return FailureAnalysis(
-#             failure_category="cumulative_drift",
-#             likely_root_cause=(
-#                 f"Total drift is {drift:.1f}s — small per-segment overflows "
-#                 "accumulate because gaps between segments are not being reclaimed."
-#             ),
-#             suggested_change="Enable gap_shift in the global alignment optimizer (P9).",
-#         )
-
-#     if mean_err > 0.8:
-#         return FailureAnalysis(
-#             failure_category="stretch_quality",
-#             likely_root_cause=(
-#                 f"Mean duration error is {mean_err:.2f}s — segments fit within "
-#                 "stretch limits but the stretch distorts audio quality."
-#             ),
-#             suggested_change="Lower the mild_stretch ceiling or shorten translations.",
-#         )
-
-#     return FailureAnalysis(
-#         failure_category="ok",
-#         likely_root_cause="No dominant failure mode detected.",
-#         suggested_change="Review individual outlier segments if any remain.",
-#     )
-
-
-# def get_shorter_translations(
-#     source_text: str,
-#     baseline_es: str,
-#     target_duration_s: float,
-#     context_prev: str = "",
-#     context_next: str = "",
-# ) -> list[TranslationCandidate]:
-#     """Return shorter translation candidates that fit *target_duration_s*.
-
-#     .. admonition:: Student Assignment — Duration-Aware Translation Re-ranking
-
-#        This function is intentionally a **stub that returns an empty list**.
-#        Your task is to implement a strategy that produces shorter
-#        target-language translations when the baseline translation is too long
-#        for the time budget.
-
-#        **Inputs**
-
-#        ============== ======== ==================================================
-#        Parameter      Type     Description
-#        ============== ======== ==================================================
-#        source_text    str      Original source-language segment text
-#        baseline_es    str      Baseline target-language translation (from argostranslate)
-#        target_duration_s float Time budget in seconds for this segment
-#        context_prev   str      Text of the preceding segment (for coherence)
-#        context_next   str      Text of the following segment (for coherence)
-#        ============== ======== ==================================================
-
-#        **Outputs**
-
-#        A list of ``TranslationCandidate`` objects, sorted shortest first.
-#        Each candidate has:
-
-#        - ``text``: the shortened target-language translation
-#        - ``char_count``: ``len(text)``
-#        - ``brevity_rationale``: short note on what was changed
-
-#        **Duration heuristic**: target-language TTS produces ~15 characters/second
-#        (or ~4.5 syllables/second for Romance languages).  So a 3-second budget
-#        ≈ 45 characters.
-
-#        **Approaches to consider** (pick one or combine):
-
-#        1. **Rule-based shortening** — strip filler words, use shorter synonyms
-#           from a lookup table, contract common phrases
-#           (e.g. "en este momento" → "ahora").
-#        2. **Multiple translation backends** — call argostranslate with
-#           paraphrased input, or use a second translation model, then pick
-#           the shortest output that preserves meaning.
-#        3. **LLM re-ranking** — use an LLM (e.g. via an API) to generate
-#           condensed alternatives.  This was the previous approach but adds
-#           latency, cost, and a runtime dependency.
-#        4. **Hybrid** — rule-based first, fall back to LLM only for segments
-#           that still exceed the budget.
-
-#        **Evaluation criteria**: the caller selects the candidate whose
-#        ``len(text) / 15.0`` is closest to ``target_duration_s``.
-
-#     Returns:
-#         Empty list (stub).  Implement to return ``TranslationCandidate`` items.
-#     """
-
-#     logger.info(
-#         "get_shorter_translations called for %.1fs budget (%d chars baseline) — "
-#         "returning empty list (student assignment stub).",
-#         target_duration_s,
-#         len(baseline_es),
-#     )
-#     return []
 """Deterministic failure analysis and translation re-ranking.
 
 The failure analysis function uses simple threshold rules derived from
@@ -191,6 +24,17 @@ import urllib.request
 import urllib.error
 from typing import Optional
 from dotenv import load_dotenv
+import os
+
+from sentence_transformers import SentenceTransformer
+from scipy.spatial.distance import cosine
+import joblib
+from pathlib import Path
+
+semantic_embedder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
+PROJECT_ROOT = Path(__file__).parent.parent
+DURATION_MODEL = joblib.load(PROJECT_ROOT / "pipeline_data" / "duration_model.pkl")
 
 load_dotenv()
 
@@ -207,6 +51,13 @@ CHARS_PER_SECOND: float = 15.0  # Spanish TTS ~15 chars / second
 def _char_budget(target_duration_s: float) -> int:
     """Return the maximum character count for *target_duration_s*."""
     return max(10, int(target_duration_s * CHARS_PER_SECOND))
+
+def _calculate_semantic_distance(text1: str, text2: str) -> float:
+    """Calculate cosine distance between two text strings."""
+    emb1 = semantic_embedder.encode(text1)
+    emb2 = semantic_embedder.encode(text2)
+    # Cosine distance: 0.0 means identical meaning, 2.0 means opposite
+    return cosine(emb1, emb2)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +256,8 @@ def _multi_backend_candidates(
 # LLM re-ranking (GROQ API — fallback only)
 # ---------------------------------------------------------------------------
 
+_GROQ_MODEL = os.getenv("_GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 def _llm_shorten(
     source_text: str,
@@ -447,17 +300,20 @@ def _llm_shorten(
     payload = json.dumps({
         "model":      _GROQ_MODEL,
         "max_tokens": 1000,
-        "system":     system_prompt,
-        "messages":   [{"role": "user", "content": user_prompt}],
-    }).encode()
+        "messages":   [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+    }).encode("utf-8")
 
+    # 2. Update Headers: Add Bearer token and Cloudflare bypass User-Agent
     req = urllib.request.Request(
-        _ANTHROPIC_API_URL,
+        url=GROQ_API_URL,
         data=payload,
         headers={
-            "Content-Type":      "application/json",
-            "x-api-key":         api_key,
-            "anthropic-version": "2023-06-01",
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
         },
         method="POST",
     )
@@ -474,7 +330,9 @@ def _llm_shorten(
 
     # Extract text from the first content block
     try:
-        raw_text = body["content"][0]["text"].strip()
+        # Changed from body["content"][0]["text"]
+        raw_text = body["choices"][0]["message"]["content"].strip()
+        
         # Strip accidental markdown fences
         raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
         raw_text = re.sub(r"\n?```$", "", raw_text)
@@ -685,16 +543,17 @@ def get_shorter_translations(
     else:
         logger.debug("Budget satisfied without LLM — skipping API call.")
 
-    # ------------------------------------------------------------------
-    # Always append the baseline as the last-resort fallback
-    # ------------------------------------------------------------------
+    
+
+    # ADDITIONAL STEP FROM TASK 5.2
+    # Deduplicate (preserve order, prefer first occurrence)
+
     candidates.append(TranslationCandidate(
         text=baseline_es,
         char_count=baseline_chars,
         brevity_rationale="baseline (fallback)",
     ))
 
-    # Deduplicate (preserve order, prefer first occurrence which is shortest)
     seen: set[str] = set()
     unique: list[TranslationCandidate] = []
     for c in candidates:
@@ -702,5 +561,40 @@ def get_shorter_translations(
             seen.add(c.text)
             unique.append(c)
 
-    # Sort shortest first so the caller can pick the best fit easily
-    return sorted(unique, key=lambda c: c.char_count)
+    # ------------------------------------------------------------------
+    # Step 4: Score candidates based on Time Fit vs. Semantic Loss
+    # Score = (predicted_duration - target_duration)² + λ * semantic_distance
+    # ------------------------------------------------------------------
+    LAMBDA = 2.0  # Tuning weight: higher means meaning is more important than perfect timing
+    
+    # Helper to predict duration using Task 1 logic
+    def _predict_dur(text: str) -> float:
+        if DURATION_MODEL:
+            import re
+            chars = len(text)
+            words = len(text.split())
+            # Added accented vowels to match Spanish text accurately
+            syllables = max(1, len(re.findall(r"[aeiouáéíóúü]+", text.lower())))
+            punct = len(re.findall(r"[,.;:!?]", text))
+            features = [[chars, words, syllables, punct]]
+            return max(0.5, float(DURATION_MODEL.predict(features)[0]))
+        return len(text) / 15.0
+
+    for c in unique:
+        # Calculate Time Penalty (Squared error heavily penalizes being way off)
+        pred_dur = _predict_dur(c.text)
+        time_penalty = (pred_dur - target_duration_s) ** 2
+        
+        # Calculate Semantic Loss
+        sem_dist = _calculate_semantic_distance(baseline_es, c.text)
+        
+        # Final Objective Score (Lowest is best)
+        c.score = time_penalty + (LAMBDA * sem_dist)
+        
+        logger.debug(
+            "Scored candidate: '%s' | Dur: %.1fs | SemDist: %.3f | Total Score: %.3f", 
+            c.text[:30], pred_dur, sem_dist, c.score
+        )
+
+    # Sort lowest score first so the optimal balance of fit and meaning wins
+    return sorted(unique, key=lambda c: getattr(c, 'score', float('inf')))

@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # ── pipeline directory layout ───────────────────────────────────────
     # Centralised here so a rename is a one-line change.
     @property
+    def speakers_dir(self) -> Path:
+        return self.base_dir / "pipeline_data" / "speakers"
+        
+    @property
     def diarizations_dir(self) -> Path:
         return self.data_dir / "diarizations"
 
