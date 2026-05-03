@@ -53,21 +53,38 @@ async def tts_endpoint(
     wav_path = audio_dir / f"{title}.wav"
 
     # --- MODIFIED: Added skipped flag for caching criteria ---
-    if wav_path.exists():
-        return {
-            "video_id": video_id,
-            "audio_path": str(wav_path),
-            "config": config,
-            "skipped": True  
-        }
+    # if wav_path.exists():
+    #     return {
+    #         "video_id": video_id,
+    #         "audio_path": str(wav_path),
+    #         "config": config,
+    #         "skipped": True  
+    #     }
 
     source_path = str(trans_dir / f"{title}.json")
 
+    # --- TASK 4.1: BUILD SPEAKER-TO-VOICE MAPPING ---
+    # Load translated transcript to get speaker labels
+    with open(source_path, "r", encoding="utf-8") as f:
+        translated = json.load(f)
+    segments = translated.get("segments", [])
+
+    # Build speaker -> voice mapping dictionary
+    unique_speakers = sorted(set(seg.get("speaker", "SPEAKER_00") for seg in segments))
+    voice_map = {
+        spk: resolve_speaker_wav(settings.speakers_dir, "es", spk)
+        for spk in unique_speakers
+    }
+
+    # If the user didn't provide a specific override query param, use our smart dictionary!
+    final_voice_routing = speaker_wav if speaker_wav else voice_map
+    # ------------------------------------------------
+
+    # Pass the mapping down the pipe
     await _run_in_threadpool(
-        None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment, speaker_wav=speaker_wav
+        None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment, speaker_wav=final_voice_routing
     )
 
-    # --- MODIFIED: Added skipped flag for initial run ---
     return {
         "video_id": video_id,
         "audio_path": str(wav_path),

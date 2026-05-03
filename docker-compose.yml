@@ -29,7 +29,9 @@ services:
   chatterbox-gpu:
     container_name: foreign-whispers-tts
     profiles: [nvidia]
-    image: travisvn/chatterbox-tts-api:latest
+    build:
+      context: .
+      dockerfile: tts.Dockerfile
     restart: unless-stopped
     shm_size: "8gb"
     ports:
@@ -38,7 +40,6 @@ services:
       - DEVICE=cuda
       - DEFAULT_MODEL=multilingual
       - PORT=8020
-      - TORCH_CUDA_ARCH_LIST=12.0
     volumes:
       - chatterbox-models:/app/models
       - ./pipeline_data/speakers:/app/voices
@@ -67,6 +68,8 @@ services:
     ports:
       - "8080:8080"
     command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    env_file:
+      - .env
     environment:
       - CHATTERBOX_API_URL=http://chatterbox-gpu:8020
       - FW_WHISPER_MODEL=base

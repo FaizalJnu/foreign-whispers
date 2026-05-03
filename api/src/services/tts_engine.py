@@ -196,7 +196,7 @@ def files_from_dir(dir_path) -> list:
     return es_files
 
 
-def _synthesize_raw(tts_engine, text: str, wav_path: str) -> bytes | None:
+def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | None = None) -> bytes | None:
     """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
     if not text or not text.strip():
         return None
@@ -456,6 +456,13 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
                     en_text = en_segs[i].get("text", "")
                 seg_text = _shorten_segment_text(en_text, seg["text"], target_sec)
 
+        current_voice = None
+        if isinstance(speaker_wav, dict):
+            spk_label = seg.get("speaker", "SPEAKER_00")
+            current_voice = speaker_wav.get(spk_label)
+        else:
+            current_voice = speaker_wav
+
         seg_metas.append({
             "index": i,
             "text": seg_text,
@@ -464,6 +471,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
             "target_sec": target_sec,
             "stretch_factor": stretch_factor,
             "aligned_seg": aligned_seg,
+            "speaker_wav": current_voice,  
         })
 
     # ── Phase 1: GPU synthesis (concurrent) ───────────────────────────
@@ -475,13 +483,16 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     raw_wav_map: dict[int, bytes | None] = {}
 
     with tempfile.TemporaryDirectory() as synth_dir:
-        def _do_synth(idx: int, text: str) -> tuple[int, bytes | None]:
+        # 1. Adding speaker_wav to the signature
+        def _do_synth(idx: int, text: str, speaker_wav: str | None = None) -> tuple[int, bytes | None]:
             wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
-            return idx, _synthesize_raw(engine, text, wav_path)
+            # 2. Passing it down to _synthesize_raw
+            return idx, _synthesize_raw(engine, text, wav_path, speaker_wav=speaker_wav)
 
         with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
             futures = {
-                pool.submit(_do_synth, m["index"], m["text"]): m["index"]
+                # 3. Grabbing the speaker_wav from the 'm' metadata dict!
+                pool.submit(_do_synth, m["index"], m["text"], m.get("speaker_wav")): m["index"]
                 for m in seg_metas
             }
             for fut in as_completed(futures):

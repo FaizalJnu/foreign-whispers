@@ -20,15 +20,11 @@ class TTSService:
     def text_file_to_speech(self, source_path: str, output_path: str,
                             *, alignment: bool | None = None,
                             speaker_wav: str | None = None) -> None:
-        
-        # Import the core library function
-        from foreign_whispers.tts import text_file_to_speech as tts_text_file_to_speech
-        
-        # Pass the arguments straight through
+        # Use the engine function imported at module level
         tts_text_file_to_speech(
-            source_path, 
-            output_path, 
-            self.tts_engine, 
-            alignment=alignment, 
-            speaker_wav=speaker_wav # <-- Passing it down the pipe
+            source_path,
+            output_path,
+            self.tts_engine,
+            alignment=alignment,
+            speaker_wav=speaker_wav,
         )

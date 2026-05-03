@@ -1,6 +1,5 @@
 """POST /api/diarize/{video_id} — speaker diarization (issue fw-lua)."""
 
-import asyncio
 import json
 import subprocess
 
@@ -10,12 +9,38 @@ from api.src.core.config import settings
 from api.src.core.dependencies import resolve_title
 from api.src.schemas.diarize import DiarizeResponse
 from api.src.services.alignment_service import AlignmentService
+from foreign_whispers.diarization import assign_speakers
 
 router = APIRouter(prefix="/api")
 
 _alignment_service = AlignmentService(settings=settings)
 
-from foreign_whispers.diarization import assign_speakers
+
+def _merge_speakers_into_translations(title: str, diar_segments: list[dict]) -> None:
+    """Stamp each segment in every translation JSON with its speaker label.
+
+    Iterates over all translation backend subdirs (e.g. argos/) and rewrites
+    the matching ``<title>.json`` file so that every segment gains a
+    ``"speaker"`` field.  Idempotent — re-running after new diarization data
+    simply overwrites the previous labels.
+    """
+    translations_root = settings.data_dir / "translations"
+    if not translations_root.exists():
+        return
+
+    for backend_dir in translations_root.iterdir():
+        if not backend_dir.is_dir():
+            continue
+        trans_path = backend_dir / f"{title}.json"
+        if not trans_path.exists():
+            continue
+        try:
+            data = json.loads(trans_path.read_text())
+            segments = data.get("segments", [])
+            data["segments"] = assign_speakers(segments, diar_segments)
+            trans_path.write_text(json.dumps(data))
+        except Exception:  # noqa: BLE001 — never crash the diarize endpoint
+            pass
 
 
 @router.post("/diarize/{video_id}", response_model=DiarizeResponse)
@@ -25,10 +50,9 @@ async def diarize_endpoint(video_id: str):
     Steps:
     1. Extract audio from video via ffmpeg
     2. Run pyannote diarization
-    3. Cache and return speaker segments
+    3. Merge speaker labels into translation JSON(s)
+    4. Cache and return speaker segments
     """
-    import json
-    import subprocess
 
     title = resolve_title(video_id)
     if title is None:
@@ -43,15 +67,15 @@ async def diarize_endpoint(video_id: str):
     diar_path = diar_dir / f"{title}.json"
 
     # Return cached result
-    if diar_path.exists():
-        data = json.loads(diar_path.read_text())
+    # if diar_path.exists():
+    #     data = json.loads(diar_path.read_text())
 
-        return DiarizeResponse(
-            video_id=video_id,
-            speakers=data.get("speakers", []),
-            segments=data.get("segments", []),
-            skipped=True,
-        )
+    #     return DiarizeResponse(
+    #         video_id=video_id,
+    #         speakers=data.get("speakers", []),
+    #         segments=data.get("segments", []),
+    #         skipped=True,
+    #     )
 
     # -------------------------
     # Step 1: Extract audio
@@ -101,9 +125,7 @@ async def diarize_endpoint(video_id: str):
             status_code=500,
             detail=f"Diarization failed: {str(e)}"
         )
-    
-    print("DIAR SEGMENTS:", diar_segments[:5])
-    
+
     # -------------------------
     # Step 3: Unique speakers
     # -------------------------
@@ -116,7 +138,12 @@ async def diarize_endpoint(video_id: str):
     )
 
     # -------------------------
-    # Step 4: Cache result
+    # Step 4: Merge speaker labels into translation JSONs
+    # -------------------------
+    _merge_speakers_into_translations(title, diar_segments)
+
+    # -------------------------
+    # Step 5: Cache result
     # -------------------------
     result = {
         "speakers": speakers,
@@ -127,19 +154,12 @@ async def diarize_endpoint(video_id: str):
         json.dumps(result)
     )
 
-    transcript_path = settings.transcriptions_dir / f"{title}.json"
-    if transcript_path.exists():
-        transcript = json.loads(transcript_path.read_text())
-        labeled_segments = assign_speakers(transcript.get("segments", []), diar_segments)
-        transcript["segments"] = labeled_segments
-        transcript_path.write_text(json.dumps(transcript))
-
     # Optional cleanup
     if audio_path.exists():
         audio_path.unlink()
 
     # -------------------------
-    # Step 5: Return response
+    # Step 6: Return response
     # -------------------------
     return DiarizeResponse(
         video_id=video_id,

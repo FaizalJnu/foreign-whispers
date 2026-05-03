@@ -24,14 +24,27 @@ def diarize_audio(audio_path: str, hf_token: str | None = None) -> list[dict]:
         logger.warning("No HF token provided — diarization skipped.")
         return []
 
+    # torchaudio 2.5+ removed the top-level AudioMetaData attribute that
+    # pyannote.audio 3.x uses as a return-type annotation in io.py.  Patch
+    # it back as a NamedTuple stub *before* the import so the annotation
+    # evaluation doesn't raise AttributeError.  Only the attribute lookup
+    # matters — this stub is never called at runtime.
+    import torchaudio as _ta
+    if not hasattr(_ta, "AudioMetaData"):
+        import collections
+        _ta.AudioMetaData = collections.namedtuple(
+            "AudioMetaData",
+            ["sample_rate", "num_frames", "num_channels", "bits_per_sample", "encoding"],
+        )
+
     try:
         from pyannote.audio import Pipeline
-    except (ImportError, TypeError):
-        logger.warning("pyannote.audio not installed — returning empty diarization.")
+    except (ImportError, TypeError, AttributeError, Exception) as exc:  # noqa: BLE001
+        logger.warning("pyannote.audio not importable — returning empty diarization. (%s)", exc)
         return []
 
     try:
-        pipeline    = Pipeline.from_pretrained(
+        pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
             token=hf_token,
         )
