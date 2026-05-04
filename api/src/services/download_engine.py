@@ -15,7 +15,7 @@ def _yt_dlp_opts(**extra):
     """Base yt-dlp options. Cookies are optional — yt-dlp works without them
     by using alternative YouTube clients (Android VR) that bypass n-challenge."""
     opts = {"quiet": True, "no_warnings": True}
-    if pathlib.Path(_COOKIES_FILE).exists():
+    if pathlib.Path(_COOKIES_FILE).exists() and pathlib.Path(_COOKIES_FILE).stat().st_size > 0:
         opts["cookiefile"] = _COOKIES_FILE
     opts.update(extra)
     return opts
