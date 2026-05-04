@@ -106,6 +106,38 @@ def _compute_speech_offset(title: str) -> float:
     return yt_start - whisper_start
 
 
+def _generate_dubbed_captions(title: str) -> pathlib.Path | None:
+    """Generate and persist the dubbed VTT caption file for *title*.
+
+    Reads the translated JSON, applies the YouTube caption timing offset,
+    converts to rolling two-line WebVTT, and writes it to dubbed_captions/.
+
+    Returns the path to the written VTT file, or None if the translation JSON
+    doesn't exist (caption generation is best-effort — stitch still succeeds).
+    """
+    json_path = settings.translations_dir / f"{title}.json"
+    if not json_path.exists():
+        return None
+
+    data = json.loads(json_path.read_text())
+    segments = data.get("segments", [])
+
+    # Apply YouTube caption timing offset so subtitles start when speech begins
+    offset = _compute_speech_offset(title)
+    if offset > 0:
+        segments = [
+            {**seg, "start": seg["start"] + offset, "end": seg["end"] + offset}
+            for seg in segments
+        ]
+
+    vtt = _segments_to_vtt(segments)
+    vtt_dir = settings.dubbed_captions_dir
+    vtt_dir.mkdir(parents=True, exist_ok=True)
+    vtt_path = vtt_dir / f"{title}.vtt"
+    vtt_path.write_text(vtt)
+    return vtt_path
+
+
 @router.get("/captions/{video_id}")
 async def get_captions(video_id: str):
     """Serve translated (target-language) captions as WebVTT.
@@ -210,9 +242,12 @@ async def stitch_endpoint(
     video_id: str,
     config: str = Query(..., pattern=r"^c-[0-9a-f]{7}$"),
 ):
-    """Replace video audio with dubbed TTS audio.
+    """Replace video audio with dubbed TTS audio and generate VTT captions.
 
     *config* selects which TTS audio to use (opaque directory name).
+    Produces two artefacts:
+      - ``dubbed_videos/{config}/{title}.mp4``  — dubbed video (audio remux)
+      - ``dubbed_captions/{title}.vtt``         — rolling two-line translated captions
     """
     videos_dir = settings.videos_dir
     output_dir = settings.dubbed_videos_dir / config
@@ -225,6 +260,10 @@ async def stitch_endpoint(
     output_path = output_dir / f"{title}.mp4"
 
     if output_path.exists():
+        # Video already exists — still regenerate captions in case they are missing
+        vtt_path = settings.dubbed_captions_dir / f"{title}.vtt"
+        if not vtt_path.exists():
+            _generate_dubbed_captions(title)
         return {"video_id": video_id, "video_path": str(output_path), "config": config}
 
     video_path = str(videos_dir / f"{title}.mp4")
@@ -241,6 +280,15 @@ async def stitch_endpoint(
             str(output_path),
         ),
     )
+
+    # Generate dubbed captions alongside the video (best-effort — never blocks stitch)
+    try:
+        _generate_dubbed_captions(title)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "[stitch] caption generation failed for %s: %s", title, exc
+        )
 
     return {"video_id": video_id, "video_path": str(output_path), "config": config}
 
