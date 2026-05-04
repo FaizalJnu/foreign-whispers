@@ -28,3 +28,22 @@ class TTSService:
             alignment=alignment,
             speaker_wav=speaker_wav,
         )
+
+    def compute_alignment(
+        self,
+        en_transcript: dict,
+        es_transcript: dict,
+        silence_regions: list,
+        max_stretch: float = 1.4,
+    ) -> list:
+        """Compute aligned segments for eval/preview without running TTS.
+
+        Returns a list of AlignedSegment objects from global_align.
+        Falls back to an empty list if the alignment library is unavailable.
+        """
+        try:
+            from foreign_whispers.alignment import compute_segment_metrics, global_align
+        except ImportError:
+            return []
+        metrics = compute_segment_metrics(en_transcript, es_transcript)
+        return global_align(metrics, silence_regions, max_stretch=max_stretch)

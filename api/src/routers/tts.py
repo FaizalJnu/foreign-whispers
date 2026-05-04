@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from api.src.core.config import settings
 from api.src.core.dependencies import resolve_title
 from api.src.services.tts_service import TTSService
+from foreign_whispers.voice_resolution import resolve_speaker_wav
 
 router = APIRouter(prefix="/api")
 
@@ -43,8 +44,10 @@ async def tts_endpoint(
         tts_engine=None,
     )
 
-    if speaker_wav is None:
-        speaker_wav = resolve_speaker_wav(settings.speakers_dir, "es")
+    # Capture the raw query-param value before any fallback is applied.
+    # If the caller didn't pass speaker_wav we build per-speaker routing from
+    # diarization data; if they did, we use it as a global override for all speakers.
+    user_provided_speaker_wav = speaker_wav  # may be None
 
     title = resolve_title(video_id)
     if title is None:
@@ -58,38 +61,40 @@ async def tts_endpoint(
     #         "video_id": video_id,
     #         "audio_path": str(wav_path),
     #         "config": config,
-    #         "skipped": True  
+    #         "skipped": True
     #     }
 
     source_path = str(trans_dir / f"{title}.json")
 
-    # --- TASK 4.1: BUILD SPEAKER-TO-VOICE MAPPING ---
-    # Load translated transcript to get speaker labels
+    # Load translated transcript to get per-segment speaker labels (from diarization).
     with open(source_path, "r", encoding="utf-8") as f:
         translated = json.load(f)
     segments = translated.get("segments", [])
 
-    # Build speaker -> voice mapping dictionary
-    unique_speakers = sorted(set(seg.get("speaker", "SPEAKER_00") for seg in segments))
-    voice_map = {
-        spk: resolve_speaker_wav(settings.speakers_dir, "es", spk)
-        for spk in unique_speakers
-    }
+    if user_provided_speaker_wav is not None:
+        # Caller passed an explicit voice override — use it globally for all speakers.
+        final_voice_routing = user_provided_speaker_wav
+    else:
+        # Build a per-speaker -> voice-WAV mapping so each diarized speaker gets
+        # their own cloned voice (falls back to es/default.wav when no speaker-
+        # specific WAV exists in pipeline_data/speakers/es/).
+        unique_speakers = sorted(set(seg.get("speaker", "SPEAKER_00") for seg in segments))
+        final_voice_routing = {
+            spk: resolve_speaker_wav(settings.speakers_dir, "es", spk)
+            for spk in unique_speakers
+        }
 
-    # If the user didn't provide a specific override query param, use our smart dictionary!
-    final_voice_routing = speaker_wav if speaker_wav else voice_map
-    # ------------------------------------------------
-
-    # Pass the mapping down the pipe
+    # Pass the mapping down the pipe (dict → per-speaker, str → global override)
     await _run_in_threadpool(
-        None, svc.text_file_to_speech, source_path, str(audio_dir), alignment=alignment, speaker_wav=final_voice_routing
+        None, svc.text_file_to_speech, source_path, str(audio_dir),
+        alignment=alignment, speaker_wav=final_voice_routing,
     )
 
     return {
         "video_id": video_id,
         "audio_path": str(wav_path),
         "config": config,
-        "skipped": False
+        "skipped": False,
     }
 
 @router.get("/audio/{video_id}")
@@ -107,5 +112,3 @@ async def get_audio(
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     return FileResponse(str(audio_path), media_type="audio/wav")
-
-from foreign_whispers.voice_resolution import resolve_speaker_wav

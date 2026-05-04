@@ -23,8 +23,8 @@ from pathlib import Path
 import joblib
 
 try:
-    MODEL_PATH = Path("/home/faiz/courses/foreign-whispers/pipeline_data/duration_model.pkl")
-    DURATION_MODEL = joblib.load(MODEL_PATH)
+    PROJECT_ROOT = Path(__file__).parent.parent
+    DURATION_MODEL = joblib.load(PROJECT_ROOT / "pipeline_data" / "duration_model.pkl")
 except FileNotFoundError:
     DURATION_MODEL = None
     print("Warning: duration_model.pkl not found. Falling back to heuristic.")
