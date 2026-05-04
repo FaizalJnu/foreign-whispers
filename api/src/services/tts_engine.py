@@ -197,15 +197,81 @@ def files_from_dir(dir_path) -> list:
 
 
 def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | None = None) -> bytes | None:
-    """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
+    """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure.
+
+    For the local Coqui fallback the tacotron2-DDC model sometimes fails with
+    tensor size mismatch errors when the model's internal sentence splitter
+    produces sentences of different lengths.  We retry progressively:
+      1. Primary call (normal, with internal batching)
+      2. Retry with split=False (single-tensor, no batching)
+      3. Sentence-by-sentence synthesis and concatenation
+    """
     if not text or not text.strip():
         return None
+
+    def _write_and_read(fn, **kwargs) -> bytes | None:
+        """Call fn(text, file_path, **kwargs) and return the written bytes."""
+        fn(text=text, file_path=wav_path, **kwargs)
+        return pathlib.Path(wav_path).read_bytes()
+
+    # Attempt 1: normal call
     try:
-        tts_engine.tts_to_file(text=text, file_path=wav_path, speaker_wav=speaker_wav)
+        if hasattr(tts_engine, 'tts_to_file'):
+            # ChatterboxClient or Coqui TTS
+            tts_engine.tts_to_file(text=text, file_path=wav_path, speaker_wav=speaker_wav)
+        else:
+            tts_engine(text=text, file_path=wav_path)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
-        print(f"[tts] TTS failed for segment ({exc}), using silence")
-        return None
+        _err = str(exc)
+        # Only retry on Coqui tensor errors — other errors are real failures
+        _is_tensor_err = any(k in _err for k in (
+            "size of tensor", "stack expects each tensor", "Sizes of tensors must match"
+        ))
+        if not _is_tensor_err:
+            print(f"[tts] TTS failed for segment ({exc}), using silence")
+            return None
+
+    # Attempt 2: disable Coqui's internal sentence splitting
+    try:
+        if hasattr(tts_engine, 'synthesizer'):
+            # It's a local Coqui TTS — call with split_sentences=False
+            wav = tts_engine.tts(text=text, split_sentences=False)
+            import soundfile as _sf
+            import numpy as _np
+            _sf.write(wav_path, _np.array(wav), tts_engine.synthesizer.output_sample_rate)
+            return pathlib.Path(wav_path).read_bytes()
+    except Exception as exc2:
+        pass  # fall through to sentence-by-sentence
+
+    # Attempt 3: synthesize each sentence separately and concatenate
+    try:
+        import re as _re
+        from pydub import AudioSegment as _AS
+        sentences = _re.split(r'(?<=[.!?¿¡])\s+', text.strip())
+        sentences = [s for s in sentences if s.strip()]
+        if not sentences:
+            sentences = [text]
+        parts = []
+        for i, sent in enumerate(sentences):
+            sent_path = wav_path.replace(".wav", f"_s{i}.wav")
+            try:
+                tts_engine.tts_to_file(text=sent, file_path=sent_path,
+                                       speaker_wav=speaker_wav)
+                parts.append(_AS.from_wav(sent_path))
+            except Exception:
+                pass  # skip failed sentences
+        if parts:
+            combined = parts[0]
+            for p in parts[1:]:
+                combined = combined + p
+            combined.export(wav_path, format="wav")
+            return pathlib.Path(wav_path).read_bytes()
+    except Exception as exc3:
+        print(f"[tts] TTS failed for segment (all retries: {exc3}), using silence")
+
+    return None
+
 
 
 def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
